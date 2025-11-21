@@ -58,6 +58,62 @@ def CtrlUpdate(self):
     return True
 
 '''
+
+#pseudocode for LQR
+"""
+def CtrlUpdate(self):
+    # 0) constants (set elsewhere)
+    l = pole_length
+    m_p = pole_mass
+    g = 9.81
+    dt = self.m.opt.timestep
+
+    # 1) read pendulum state
+    p_hand = self.d.xpos[hand_body_id]    # [x,y,z]
+    p_tip  = self.d.xpos[pole_tip_body_id]
+    v = p_tip - p_hand
+    theta = math.atan2(v[0], v[2])   # x horizontal, z up; adjust if axes differ
+
+    # theta_dot: prefer body angvel
+    av = self.d.angvel[pole_body_id]    # body angular velocity (3-vector)
+    theta_dot = av[1]  # choose correct component depending on axis of rotation
+    # alternatively: finite diff with LPF
+
+    # 2) state vector
+    x = np.array([theta, theta_dot])
+
+    # 3) LQR gain K (precomputed offline or compute once in init)
+    u_des = -K.dot(x)   # u_des is desired hand horizontal acceleration
+
+    # saturate acceleration
+    u_des = np.clip(u_des, -amax, amax)
+
+    # 4) desired hand force
+    F_hand = np.array([m_p * u_des, 0.0, 0.0])
+
+    # 5) Jacobian J_trans (3 x n). Use MuJoCo helper or finite diff if needed.
+    J = compute_translational_jacobian(self.m, self.d, hand_body_id)
+
+    # 6) task torques (simple map)
+    tau_task = J.T.dot(F_hand)
+
+    # 7) gravity compensation (MuJoCo can compute it; if not approximate)
+    tau_g = compute_gravity_torques(self.m, self.d)  # size n
+
+    # 8) posture (nullspace) PD to hold init_qpos, low gain
+    kp_null = 5.0
+    kd_null = 0.5
+    q_err = self.init_qpos - self.d.qpos
+    tau_null = kp_null * q_err - kd_null * self.d.qvel
+    # project nullspace: in practice you can add a small tau_null scaled, or compute nullspace projector
+
+    # 9) final torque and limits
+    tau = tau_task + tau_g + 0.05 * tau_null
+    tau = np.clip(tau, -tau_max, tau_max)
+
+    self.d.ctrl[:len(tau)] = tau[:self.m.nu]
+    return True
+"""
 class YourCtrl:
   def __init__(self, m:mujoco.MjModel, d: mujoco.MjData):
     self.m = m
