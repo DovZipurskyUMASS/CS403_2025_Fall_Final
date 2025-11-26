@@ -1,6 +1,6 @@
 import mujoco
 import numpy as np
-from scipy.linalg import inv, eig
+from scipy.linalg import inv, eig, expm, solve_discrete_are
 
 #mass of pendulum = 0.2
 #inertia of pendulum 0.001 0.003 0.003
@@ -114,6 +114,8 @@ def CtrlUpdate(self):
     self.d.ctrl[:len(tau)] = tau[:self.m.nu]
     return True
 """
+#pend length = 0.42
+#mass of pendulum = 0.2
 class YourCtrl:
   def __init__(self, m:mujoco.MjModel, d: mujoco.MjData):
     self.m = m
@@ -126,8 +128,34 @@ class YourCtrl:
 
 
   def CtrlUpdate(self):
-    for i in range(6):
-       self.d.ctrl[i] = 150.0*(self.init_qpos[i] - self.d.qpos[i])  - 5.2 *self.d.qvel[i]
+    #relevant values
+    ctrl0 = [0, 0, 0, 0, 0, 0]
+    nu = self.m.nu #number of actuators in the system
+    nv = self.m.nv #DOF of system
+    dq = np.zeros(nv)
+
+    R = np.eye(nu) #set Matrix R to the identity matrix, can tweak this later
+    Q = np.eye(2*nv) #set Matrix Q to identity, tweak later
+
+    A = np.zeros((2*nv, 2*nv)) 
+    B = np.zeros((2*nv, nu))
+    epsilon = 1e-6 #delta for mujoco's computation
+
+    #function that computes finite, discrete time transistion matrices. Technically computes four,
+    #but we set the last two params to None bc we only care about A and B
+    #the values are placed in the A and B we defined above, no need to explicitly 
+    #capture return values.
+    mujoco.mjd_transitionFD(self.m, self.d, epsilon, True, A, B, None, None)
+
+    #compute P on way to K, K being our actual gain matrix (sick)
+    P = solve_discrete_are(A, B, Q, R)
+    K = np.linalg.inv(R + B.T @ P @ B) @ B.T @ P @ A
+
+    mujoco.mj_differentiatePos(self.m, dq, 1, self.init_qpos, self.d.qpos)
+    dx = np.hstack((dq, self.d.qvel)).T
+
+    self.d.ctrl = ctrl0 - K @ dx
+    
     return True 
 
 
