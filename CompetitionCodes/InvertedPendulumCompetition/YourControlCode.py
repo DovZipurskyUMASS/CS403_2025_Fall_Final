@@ -9,56 +9,6 @@ from scipy.linalg import inv, eig, expm, solve_discrete_are
 #velocity, and acceleration of the joints in global frame
 #things like d.body_pos are localy framed
 
-#chat gpt's pseudocode for pendulum balancing:
-'''
-def CtrlUpdate(self):
-    # 1) compute pendulum vector and angle
-    p_hand = self.d.xpos[hand_body_id]   # 3-vector
-    p_tip  = self.d.xpos[pole_tip_body_id]
-    v = p_tip - p_hand                   # pole vector pointing from hand to tip
-
-    # theta: small-angle about x axis in the x-z plane (x horizontal, z up)
-    theta = math.atan2(v[0], v[2])
-    # differentiate theta (filtered)
-    if not hasattr(self, "theta_prev"):
-        self.theta_prev = theta
-        self.t_prev = 0.0
-        self.theta_dot = 0.0
-    dt = self.m.opt.timestep
-    raw_theta_dot = (theta - self.theta_prev) / dt
-    # simple filter
-    alpha = 0.2
-    self.theta_dot = alpha*raw_theta_dot + (1-alpha)*self.theta_dot
-    self.theta_prev = theta
-
-    # 2) desired pivot acceleration (linear controller or LQR)
-    kp_pend = 120.0   # tune these
-    kd_pend = 20.0
-    xdd_des = -kp_pend * theta - kd_pend * self.theta_dot
-
-    # clamp
-    xdd_des = max(min(xdd_des, 50.0), -50.0)
-
-    # 3) desired force at hand (mass of pole m_p)
-    F_x = pole_mass * xdd_des
-    F = np.array([F_x, 0.0, 0.0])
-
-    # 4) map to joint torques: tau = J^T * F
-    J = compute_translational_jacobian(self.m, self.d, hand_body_id)  # 3 x n
-    tau_task = J.T.dot(F)   # n vector
-
-    # 5) gravity compensation (simple)
-    tau_g = compute_gravity_compensation(self.m, self.d)  # n vector, use MuJoCo function if available
-
-    # 6) final torques + saturation
-    tau = tau_task + tau_g
-    tau = np.clip(tau, -max_tau, max_tau)
-
-    self.d.ctrl[:len(tau)] = tau[:self.m.nu]
-    return True
-
-'''
-
 #pseudocode for LQR
 """
 def CtrlUpdate(self):
@@ -129,32 +79,84 @@ class YourCtrl:
 
   def CtrlUpdate(self):
     #relevant values
-    ctrl0 = [0, 0, 0, 0, 0, 0]
-    nu = self.m.nu #number of actuators in the system
-    nv = self.m.nv #DOF of system
-    dq = np.zeros(nv)
+    #ctrl0 = [0, 0, 0, 0, 0, 0]
+    pend_id = mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_BODY, "pendulum")
+    hand_id = mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_BODY, "EE_Frame")
+    pend_len = 0.42
+    pend_mass = 0.2
+    g = 9.81
+    dt = float(self.m.opt.timestep)
+    
+    #nu = self.m.nu #number of actuators in the system
+    #nv = self.m.nv #DOF of system
+    #dq = np.zeros(nv)
 
-    R = np.eye(nu) #set Matrix R to the identity matrix, can tweak this later
-    Q = np.eye(2*nv) #set Matrix Q to identity, tweak later
+    #R = np.eye(nu) #set Matrix R to the identity matrix, can tweak this later
+    #Q = np.eye(2*nv) #set Matrix Q to identity, tweak later
 
-    A = np.zeros((2*nv, 2*nv)) 
-    B = np.zeros((2*nv, nu))
-    epsilon = 1e-6 #delta for mujoco's computation
+    A_cont = np.array([[0.0, 1.0],
+                      [g / pend_len, 0.0]])
+    B_cont = np.array([[0.0],
+                      [-1.0 / pend_len]])
+    
+    M = np.block([[A_cont, B_cont],
+                      [np.zeros((1, 3))]])
+    Md = expm(M * dt)
+    n = A_cont.shape[0]
+    Ad = Md[:n, :n]
+    Bd = Md[:n, n:n+1] 
 
-    #function that computes finite, discrete time transistion matrices. Technically computes four,
-    #but we set the last two params to None bc we only care about A and B
-    #the values are placed in the A and B we defined above, no need to explicitly 
-    #capture return values.
-    mujoco.mjd_transitionFD(self.m, self.d, epsilon, True, A, B, None, None)
 
-    #compute P on way to K, K being our actual gain matrix (sick)
-    P = solve_discrete_are(A, B, Q, R)
-    K = np.linalg.inv(R + B.T @ P @ B) @ B.T @ P @ A
+    #A = np.zeros((2*nv, 2*nv)) 
+    #B = np.zeros((2*nv, nu))
+    #epsilon = 1e-6 #delta for mujoco's computation
+    #mujoco.mjd_transitionFD(self.m, self.d, epsilon, True, A, B, None, None)
+    #P = solve_discrete_are(A, B, Q, R)
+    #K = np.linalg.inv(R + B.T @ P @ B) @ B.T @ P @ A
 
-    mujoco.mj_differentiatePos(self.m, dq, 1, self.init_qpos, self.d.qpos)
-    dx = np.hstack((dq, self.d.qvel)).T
+    Q = np.diag([200.0, 2.0])   
+    R = np.array([[0.01]])    
+        
+    P = solve_discrete_are(Ad, Bd, Q, R)
+    Kd = np.linalg.inv(Bd.T @ P @ Bd + R) @ (Bd.T @ P @ Ad)  # shape (1,2)
 
-    self.d.ctrl = ctrl0 - K @ dx
+
+    jacp = np.zeros((3, self.m.nv))
+    jacr = np.zeros((3, self.m.nv))
+    tau_g = np.zeros(self.m.nv)
+    initialized_ctrl = True
+
+    p_hand = self.d.xpos[self.m.joint("wrist_roll").id]   # shape (3,)
+    p_pole = self.d.xpos[pend_id]   # shape (3,)
+    v = p_pole - p_hand #world position of pole to measure angle from global horizontal
+
+    theta = float(np.arctan2(v[0], v[2]))
+
+    angvel = self.d.qpos[self.m.joint("wrist_roll").id]  # shape (3,)
+    theta_dot = float(angvel) 
+
+    x = np.array([theta, theta_dot])
+
+    u_des = float(- (Kd @ x))
+
+    F_hand = np.array([pend_mass * u_des, 0.0, 0.0])
+
+    mujoco.mj_jacBody(self.m, self.d, jacp, jacr, hand_id)
+
+    J = jacp[:, :self.m.nu]  # 3 x nu
+    tau_task = J.T @ F_hand      
+
+    _qacc_zero = np.zeros(self.m.nv, dtype=np.float64)
+
+    mujoco.mj_rne(self.m, self.d, 0, tau_g)  # last arg tau array
+    tau_g = tau_g[:self.m.nu]
+
+    q_err = self.init_qpos[:self.m.nu] - self.d.qpos[:self.m.nu]
+    tau_null = 0.5 * q_err - 0.5 * self.d.qvel[:self.m.nu]
+
+    tau = tau_g + tau_task + 0.8 * tau_null
+
+    self.d.ctrl[:self.m.nu] = tau
     
     return True 
 
