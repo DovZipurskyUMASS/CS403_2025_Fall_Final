@@ -154,7 +154,7 @@ class YourCtrl:
     q_err = self.init_qpos[:self.m.nu] - self.d.qpos[:self.m.nu]
     tau_null = 0.5 * q_err - 0.5 * self.d.qvel[:self.m.nu]
 
-    tau = tau_g + tau_task + 0.8 * tau_null
+    tau = tau_g + tau_task + 0.08 * tau_null
 
     self.d.ctrl[:self.m.nu] = tau
     
