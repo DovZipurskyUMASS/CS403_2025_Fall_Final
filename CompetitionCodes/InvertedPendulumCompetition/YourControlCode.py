@@ -86,22 +86,19 @@ class YourCtrl:
 
         self.K = self.LqrGain()
 
+        #l = pole_length #TODO UPDATE THESE BC I THINK USED IN LQR?
+        #m_p = pole_mass 
+
     def GetState(self): #get theta, theta dot of pendulum #returns a tuple
-        th = self.d.qpos[self.pj_pos_idx] # is this right?
+        th = self.d.qpos[self.pj_pos_idx]
         th_dot = self.d.qvel[self.pj_vel_idx]
         return np.array([th, th_dot])
 
     def LqrGain(self, v):
         k = 0
         return k 
-    
-    def gravityComp(self):
-        return 0
 
     def CtrlUpdate(self):
-        # 0) constants (set elsewhere)
-        #l = pole_length
-        #m_p = pole_mass
         ## 1) read pendulum state vector make into np.array? ok update that
         x = self.GetState()
         ## 3) LQR gain K (precomputed offline or compute once in init)
@@ -110,7 +107,7 @@ class YourCtrl:
 
         ## saturate acceleration
         #u_des = np.clip(u_des, -amax, amax)
-        u_des = np.clip(u_des, -50, 50)
+        u_des = np.clip(u_des, -50, 50) # what do we actually set the clipping values at #TODO
         ## 4) desired hand force
         F_hand = np.array([u_des, 0, 0]) 
         # todo should this be u_des or u_Des multipleid with mass of p?
@@ -119,24 +116,32 @@ class YourCtrl:
         point = np.zeros(3) # attached to body so offset from body
         jacr = None # omega focused so orientation/angular stuff 
         jacp = np.zeros((3, self.m.nv)) # linear velocity focus?
-        mujoco.mj_jac(self.m, self.d, jacp, jacr, point, self.hand_body_id)
-        # returns void
-
+        mujoco.mj_jac(self.m, self.d, jacp, jacr, point, self.hand_body_id) #mj_jac returns void
         ## 6) task torques (simple map)
         #tau_task = J.T.dot(F_hand)
         tau_task = jacp.T.dot(F_hand)
         ## 7) gravity compensation (MuJoCo can compute it; if not approximate)
         #tau_g = compute_gravity_torques(self.m, self.d)  # size n
-        self.gravityComp() #TODO left off here
+        # void mj_rne(const mjModel* m, mjData* d, int flg_acc, mjtNum* result)
+        tau_g = np.zeros(self.m.nv)
+        mujoco.mj_rne(self.m, self.d, 0, tau_g)
         ## 8) posture (nullspace) PD to hold init_qpos, low gain
         #kp_null = 5.0
         #kd_null = 0.5
         #q_err = self.init_qpos - self.d.qpos
-        #tau_null = kp_null * q_err - kd_null * self.d.qvel
+        q_err = self.init_qpos - self.d.qpos
+        kp_null = 5.0
+        kd_null = 0.5
+        #tau_null = kp_null * q_err - kd_null * self.d.
+        tau_null = kp_null * q_err - kd_null * self.d.qvel
         ## project nullspace: in practice you can add a small tau_null scaled, or compute nullspace projector
         ## 9) final torque and limits
-        #tau = tau_task + tau_g + 0.05 * tau_null
+        tau = tau_task + tau_g + 0.05 * tau_null # why 0.05? ?? can we do something else?
         #tau = np.clip(tau, -tau_max, tau_max)
-        #self.d.ctrl[:len(tau)] = tau[:self.m.nu]
+        tau = np.clip(tau, -200, 200) # why 200? # what do we actually set the clipping values at #TODO
+        #self.d.ctrl[:len(tau)] = tau[:self.m.nu] # dont think this is right, d.ctrl[] is  (nu x 1) 
+        # but that doesnt seem consistent with what we are using, which is nv a lot. which better fits 
+        # use of d.qfrc_applied ? 
+        self.d.qfrc_applied[:self.nv] = tau 
         return True
 
