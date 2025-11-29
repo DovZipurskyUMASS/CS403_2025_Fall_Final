@@ -1,6 +1,6 @@
 import mujoco
 import numpy as np
-from scipy.linalg import inv, eig
+from scipy.linalg import inv, eig, solve_discrete_are, expm
 
 #mass of pendulum = 0.2
 #inertia of pendulum 0.001 0.003 0.003
@@ -95,8 +95,27 @@ class YourCtrl:
         return np.array([th, th_dot])
 
     def LqrGain(self, v):
-        k = 0
-        return k 
+        pend_len = 0.42
+        g = 9.81
+        dt = float(self.m.opt.timestep)
+        A_cont = np.array([[0.0, 1.0],
+                      [g / pend_len, 0.0]])
+        B_cont = np.array([[0.0],
+                      [-1.0 / pend_len]])
+    
+        M = np.block([[A_cont, B_cont],
+                      [np.zeros((1, 3))]])
+        Md = expm(M * dt)
+        n = A_cont.shape[0]
+        Ad = Md[:n, :n]
+        Bd = Md[:n, n:n+1]
+
+        Q = np.diag([200.0, 2.0])   
+        R = np.array([[0.01]])    
+        
+        P = solve_discrete_are(Ad, Bd, Q, R)
+        Kd = np.linalg.inv(Bd.T @ P @ Bd + R) @ (Bd.T @ P @ Ad)  # shape (1,2) 
+        return Kd 
 
     def CtrlUpdate(self):
         ## 1) read pendulum state vector make into np.array? ok update that
