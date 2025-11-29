@@ -84,6 +84,7 @@ class YourCtrl:
     hand_id = mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_BODY, "EE_Frame")
     pend_len = 0.42
     pend_mass = 0.2
+    MassM = np.zeros((self.m.nv, self.m.nv))
     g = 9.81
     dt = float(self.m.opt.timestep)
     
@@ -124,29 +125,48 @@ class YourCtrl:
     jacp = np.zeros((3, self.m.nv))
     jacr = np.zeros((3, self.m.nv))
     tau_g = np.zeros(self.m.nv)
-    initialized_ctrl = True
+    #initialized_ctrl = True
 
-    p_hand = self.d.xpos[self.m.joint("wrist_roll").id]   # shape (3,)
-    p_pole = self.d.xpos[pend_id]   # shape (3,)
+    p_hand = self.d.xpos[pend_id]   # shape (3,)
+    p_pole = self.d.geom_xpos[mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_GEOM, "mass")]   # shape (3,)
     v = p_pole - p_hand #world position of pole to measure angle from global horizontal
 
     theta = float(np.arctan2(v[0], v[2]))
 
-    angvel = self.d.qpos[self.m.joint("wrist_roll").id]  # shape (3,)
-    theta_dot = float(angvel) 
+    angvel = self.d.cvel[pend_id, 3:6]  # shape (3,)
+    theta_dot = float(angvel[0]) 
 
     x = np.array([theta, theta_dot])
 
     u_des = float(- (Kd @ x))
+    a_hand = np.array([u_des, 0.0, 0.0], dtype=np.float64)
+    _J_prev = np.zeros((3, self.m.nv), dtype=np.float64) 
 
     F_hand = np.array([pend_mass * u_des, 0.0, 0.0])
 
     mujoco.mj_jacBody(self.m, self.d, jacp, jacr, hand_id)
+    Jv = jacp
+    
+    Jdot = (Jv - _J_prev) / dt
+    Jdot_qdot = Jdot @ self.d.qvel[:self.m.nv]
+    _J_prev[:] = Jv.copy()
 
-    J = jacp[:, :self.m.nu]  # 3 x nu
-    tau_task = J.T @ F_hand      
+    A = Jv[:, :self.m.nu]          # 3 x nu (actuated columns)
+    rhs = a_hand - Jdot_qdot
 
-    _qacc_zero = np.zeros(self.m.nv, dtype=np.float64)
+    AA_T = A @ A.T + np.eye(3) 
+    qdd_act = A.T @ np.linalg.solve(AA_T, rhs)   # nu-vector
+
+    qacc_des = np.zeros(self.m.nv, dtype=np.float64)
+    qacc_des[:self.m.nu] = qdd_act
+
+    #actual inverse kinematics
+    mujoco.mj_forward(self.m, self.d)
+    mujoco.mj_fullM(self.m, MassM, self.d.qM)
+
+    tau_all = MassM @ qacc_des + self.d.qfrc_bias
+
+    tau_act = tau_all[:self.m.nu].copy()
 
     mujoco.mj_rne(self.m, self.d, 0, tau_g)  # last arg tau array
     tau_g = tau_g[:self.m.nu]
@@ -154,7 +174,9 @@ class YourCtrl:
     q_err = self.init_qpos[:self.m.nu] - self.d.qpos[:self.m.nu]
     tau_null = 0.5 * q_err - 0.5 * self.d.qvel[:self.m.nu]
 
-    tau = tau_g + tau_task + 0.08 * tau_null
+    q_err = self.init_qpos[:self.m.nu] - self.d.qpos[:self.m.nu]
+    tau_null = q_err * self.d.qvel[:self.m.nu]
+    tau = tau_act + tau_null
 
     self.d.ctrl[:self.m.nu] = tau
     
