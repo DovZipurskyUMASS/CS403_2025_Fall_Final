@@ -272,6 +272,7 @@ def _physics_loop(simulate: _Simulate, loader: Optional[_InternalLoaderType]):
 
                     # Update control signal
                     pend_ctrl.CtrlUpdate()
+
                     pushing_trial_gap = 4.0
                     pushing_duration = 0.1
                     pend_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "pendulum")  # Ensure correct object type

@@ -73,8 +73,8 @@ class YourCtrl:
     self.init_qpos = d.qpos.copy()
 
     # Control gains (using similar values to CircularMotion)
-    self.kp = 50.0
-    self.kd = 3.0
+    self.kp = 8.0
+    self.kd = 1.0
 
 
   def CtrlUpdate(self):
@@ -137,16 +137,38 @@ class YourCtrl:
 
     x = np.array([theta, theta_dot])
 
-    u_des = float(- (Kd @ x))
+    #u_des = float(- (Kd @ x))
+    u_des = g * -theta + pend_len * (-self.kp * -theta - self.kd * theta_dot)
+    u_des = -1 * u_des
+
+    #amax = 20.0
+    #u_des = np.clip(u_des, -amax, amax)
 
     F_hand = np.array([pend_mass * u_des, 0.0, 0.0])
 
     mujoco.mj_jacBody(self.m, self.d, jacp, jacr, hand_id)
 
     J = jacp[:, :self.m.nu]  # 3 x nu
-    tau_task = J.T @ F_hand      
+    J_prev = getattr(self, '_J_prev', J.copy())
+    Jdot = (J - J_prev) / float(self.m.opt.timestep)
+    Jdot_qdot = Jdot @ self.d.qvel[:self.m.nu]
+    self._J_prev = J.copy()
 
-    _qacc_zero = np.zeros(self.m.nv, dtype=np.float64)
+    xdd_des = np.array([u_des, 0.0, 0.0])
+
+    rhs = xdd_des - Jdot_qdot
+    # damped least-squares for robustness
+    damp = 1e-4
+    JJ = J @ J.T + np.eye(3) * damp
+    qdd_des = J.T @ np.linalg.solve(JJ, rhs)   
+
+    mujoco.mj_forward(self.m, self.d)
+  
+    M = np.zeros((self.m.nv, self.m.nv))
+    mujoco.mj_fullM(self.m, M, self.d.qM)
+
+    tau_all = M @ qdd_des + self.d.qfrc_bias
+    tau_task = tau_all[:self.m.nu]
 
     mujoco.mj_rne(self.m, self.d, 0, tau_g)  # last arg tau array
     tau_g = tau_g[:self.m.nu]
@@ -157,6 +179,7 @@ class YourCtrl:
     tau = tau_g + tau_task + 0.08 * tau_null
 
     self.d.ctrl[:self.m.nu] = tau
+    print("theta, theta_dot, u_des:", theta, theta_dot, u_des)
     
     return True 
 
