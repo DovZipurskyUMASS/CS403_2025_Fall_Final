@@ -87,13 +87,6 @@ class YourCtrl:
     MassM = np.zeros((self.m.nv, self.m.nv))
     g = 9.81
     dt = float(self.m.opt.timestep)
-    
-    #nu = self.m.nu #number of actuators in the system
-    #nv = self.m.nv #DOF of system
-    #dq = np.zeros(nv)
-
-    #R = np.eye(nu) #set Matrix R to the identity matrix, can tweak this later
-    #Q = np.eye(2*nv) #set Matrix Q to identity, tweak later
 
     A_cont = np.array([[0.0, 1.0],
                       [g / pend_len, 0.0]])
@@ -107,16 +100,8 @@ class YourCtrl:
     Ad = Md[:n, :n]
     Bd = Md[:n, n:n+1] 
 
-
-    #A = np.zeros((2*nv, 2*nv)) 
-    #B = np.zeros((2*nv, nu))
-    #epsilon = 1e-6 #delta for mujoco's computation
-    #mujoco.mjd_transitionFD(self.m, self.d, epsilon, True, A, B, None, None)
-    #P = solve_discrete_are(A, B, Q, R)
-    #K = np.linalg.inv(R + B.T @ P @ B) @ B.T @ P @ A
-
-    Q = np.diag([200.0, 2.0])   
-    R = np.array([[0.01]])    
+    Q = np.diag([200.0, 30.0])   
+    R = np.array([[0.1]])    
         
     P = solve_discrete_are(Ad, Bd, Q, R)
     Kd = np.linalg.inv(Bd.T @ P @ Bd + R) @ (Bd.T @ P @ Ad)  # shape (1,2)
@@ -142,7 +127,7 @@ class YourCtrl:
     a_hand = np.array([u_des, 0.0, 0.0], dtype=np.float64)
     _J_prev = np.zeros((3, self.m.nv), dtype=np.float64) 
 
-    F_hand = np.array([pend_mass * u_des, 0.0, 0.0])
+    #F_hand = np.array([pend_mass * u_des, 0.0, 0.0])
 
     mujoco.mj_jacBody(self.m, self.d, jacp, jacr, hand_id)
     Jv = jacp
