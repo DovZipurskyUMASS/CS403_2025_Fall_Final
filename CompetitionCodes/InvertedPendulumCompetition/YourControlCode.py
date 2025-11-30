@@ -1,166 +1,123 @@
 import mujoco
 import numpy as np
-from scipy.linalg import inv, eig, solve_discrete_are, expm
+from scipy.linalg import solve_continuous_are
 
-#mass of pendulum = 0.2
-#inertia of pendulum 0.001 0.003 0.003
-#for PID: need to have a target value we can calculate error from
-#useful mujoco things: d.qpos, d.qvel, d.qacc to get the quaternions of the position,
-#velocity, and acceleration of the joints in global frame
-#things like d.body_pos are localy framed
-
-#pseudocode for LQR
-"""
-def CtrlUpdate(self):
-    # 0) constants (set elsewhere)
-    l = pole_length
-    m_p = pole_mass
-    g = 9.81
-    dt = self.m.opt.timestep
-
-    # 1) read pendulum state
-    p_hand = self.d.xpos[hand_body_id]    # [x,y,z]
-    p_tip  = self.d.xpos[pole_tip_body_id]
-    v = p_tip - p_hand
-    theta = math.atan2(v[0], v[2])   # x horizontal, z up; adjust if axes differ
-
-    # theta_dot: prefer body angvel
-    av = self.d.angvel[pole_body_id]    # body angular velocity (3-vector)
-    theta_dot = av[1]  # choose correct component depending on axis of rotation
-    # alternatively: finite diff with LPF
-
-    # 2) state vector
-    x = np.array([theta, theta_dot])
-
-    # 3) LQR gain K (precomputed offline or compute once in init)
-    u_des = -K.dot(x)   # u_des is desired hand horizontal acceleration
-
-    # saturate acceleration
-    u_des = np.clip(u_des, -amax, amax)
-
-    # 4) desired hand force
-    F_hand = np.array([m_p * u_des, 0.0, 0.0])
-
-    # 5) Jacobian J_trans (3 x n). Use MuJoCo helper or finite diff if needed.
-    J = compute_translational_jacobian(self.m, self.d, hand_body_id)
-
-    # 6) task torques (simple map)
-    tau_task = J.T.dot(F_hand)
-
-    # 7) gravity compensation (MuJoCo can compute it; if not approximate)
-    tau_g = compute_gravity_torques(self.m, self.d)  # size n
-
-    # 8) posture (nullspace) PD to hold init_qpos, low gain
-    kp_null = 5.0
-    kd_null = 0.5
-    q_err = self.init_qpos - self.d.qpos
-    tau_null = kp_null * q_err - kd_null * self.d.qvel
-    # project nullspace: in practice you can add a small tau_null scaled, or compute nullspace projector
-
-    # 9) final torque and limits
-    tau = tau_task + tau_g + 0.05 * tau_null
-    tau = np.clip(tau, -tau_max, tau_max)
-
-    self.d.ctrl[:len(tau)] = tau[:self.m.nu]
-    return True
-"""
-
+# Heavily referenced from this youtube video: https://www.youtube.com/watch?v=HMyD0IfPHfA
 class YourCtrl:
     def __init__(self, m:mujoco.MjModel, d: mujoco.MjData):
         self.m = m
         self.d = d
-        self.init_qpos = d.qpos.copy()
-
+    
         # Control gains (using similar values to CircularMotion)
         self.kp = 50.0
-        self.kd = 3.0
-
-        self.dt = self.m.opt.timestep # might need altering later 
-
-        self.pendulum_body_id = self.m.body("pendulum").id
-        self.pendulum_joint_id = self.m.joint("pend_roll").id
-        self.hand_body_id = self.m.body("EE_Frame").id
-
-        self.pj_pos_idx = self.m.jnt_qposadr[self.pendulum_joint_id]
-        self.pj_vel_idx = self.m.jnt_dofadr[self.pendulum_joint_id]
-
-        self.K = self.LqrGain()
-
-        #l = pole_length #TODO UPDATE THESE BC I THINK USED IN LQR?
-        #m_p = pole_mass 
-
-    def GetState(self): #get theta, theta dot of pendulum #returns a tuple
-        th = self.d.qpos[self.pj_pos_idx]
-        th_dot = self.d.qvel[self.pj_vel_idx]
-        return np.array([th, th_dot])
-
-    def LqrGain(self, v):
-        pend_len = 0.42
-        g = 9.81
-        dt = float(self.m.opt.timestep)
-        A_cont = np.array([[0.0, 1.0],
-                      [g / pend_len, 0.0]])
-        B_cont = np.array([[0.0],
-                      [-1.0 / pend_len]])
-    
-        M = np.block([[A_cont, B_cont],
-                      [np.zeros((1, 3))]])
-        Md = expm(M * dt)
-        n = A_cont.shape[0]
-        Ad = Md[:n, :n]
-        Bd = Md[:n, n:n+1]
-
-        Q = np.diag([200.0, 2.0])   
-        R = np.array([[0.01]])    
+        self.kd = 5.0
         
-        P = solve_discrete_are(Ad, Bd, Q, R)
-        Kd = np.linalg.inv(Bd.T @ P @ Bd + R) @ (Bd.T @ P @ Ad)  # shape (1,2) 
-        return Kd 
+        self.nv = self.m.nv #dof: 7
+        self.nu = self.m.nu #actuators: 6
+        
+        self.d_temp = mujoco.MjData(self.m) #temporary system for A, B calculations
+        
+        #initial position and velocities
+        q0  = self.d.qpos.copy() #q1, q2, q3, q4, q5, q6, q7
+        qd0 = self.d.qvel.copy() #qdot1, qdot2, qdot3, qdot4, qdot5, qdot6, qdot7
+        
+        #set temp model to og positions, no velocities or joint inputs
+        self.d_temp.qpos[:] = q0
+        self.d_temp.qvel[:] = 0.0
+        self.d_temp.ctrl[:] = 0.0
+        
+        mujoco.mj_forward(self.m, self.d_temp)
+        
+        # generalized forces for starting position
+        # emphasize starting position (might be bad for bad starting positions)
+        bias = self.d_temp.qfrc_bias.copy()
+        u0 = bias[:self.nu].copy() 
+        
+        #write starting torques to start position (keep it in place)
+        self.d.ctrl[:self.nu] = u0
+        
+        x0 = np.concatenate([q0, qd0])
+        inputs0 = np.concatenate([x0, u0])
+        f0 = self._f(inputs0)
+        
+        #perturb f1 and compute A and B
+        pert = 1e-3 #adjust value
+        A = self._compute_A(x0, u0, f0, pert)
+        B = self._compute_B(x0, u0, f0, pert)
+        
+        #Q and R
+        Q = np.eye((2*self.nv)) # 
+        Q = np.diag([40]*self.nv + [150]*self.nv) # joint pos err penalty, joint vel err penalty
+        rho = 0.05 #adjust value
+        R = rho * np.eye((self.nu))
+        
+        #compute K
+        P = solve_continuous_are(A, B, Q, R)
+        self.K = np.linalg.inv(R) @ B.T @ P
+        
+        self.x_ref = x0
+        self.u_ref = u0
+        
+        
+    def _f(self, inputs): # 14 state + 6 control inputs, 14-dim xdot output
+        #state = q1, q1dot, q2, q2dot, q3, q3dot, q4, q4dot, q5, q5dot, q6, q6dot, q7, q7dot
+        #inputs = state, u1, u2, u3, u4, u5, u6
+        #outputs = q1dot, q1ddot, q2dot, q2ddot, q3dot, q3ddot, q4dot, q4ddot, q5dot, q5ddot, q6dot, q6ddot, q7dot, q7ddot
 
+        q = inputs[0:self.nv]
+        qdot = inputs[self.nv:2*self.nv]
+        u = inputs[2*self.nv:2*self.nv+self.nu]
+        
+        #write info into temp data rather than affecting actual model
+        self.d_temp.qpos[:] = q
+        self.d_temp.qvel[:] = qdot
+        self.d_temp.ctrl[:self.nu] = u
+        
+        mujoco.mj_forward(self.m, self.d_temp)
+ 
+        xdot = np.concatenate([self.d_temp.qvel.copy(), self.d_temp.qacc.copy()])
+        
+        return xdot
+    
+    def _compute_A(self, x0, u0, f0, pert):
+        A = np.zeros((14, 14))
+        for i in range(14):
+            x_pert = x0.copy()
+            x_pert[i] += pert
+
+            inputs_pert = np.concatenate([x_pert, u0])
+            f_pert = self._f(inputs_pert)
+            
+            A[:, i] = (f_pert - f0) / pert
+        return A
+        
+    def _compute_B(self, x0, u0, f0, pert):
+        B = np.zeros((14, 6))
+        for i in range(6):
+            u_pert = u0.copy()
+            u_pert[i] += pert
+            
+            inputs_pert = np.concatenate([x0, u_pert])
+            f_pert = self._f(inputs_pert)
+            
+            B[:, i] = (f_pert - f0) / pert
+        return B
+        
+    
     def CtrlUpdate(self):
-        ## 1) read pendulum state vector make into np.array? ok update that
-        x = self.GetState()
-        ## 3) LQR gain K (precomputed offline or compute once in init)
-        # u_des is desired hand horizontal acceleration
-        u_des = -self.K.dot(x) # u = - K * x
+        q  = self.d.qpos.copy() #q1, q2, q3, q4, q5, q6, q7
+        qd = self.d.qvel.copy() #qdot1, qdot2, qdot3, qdot4, qdot5, qdot6, qdot7
+        x  = np.concatenate([q, qd])
 
-        ## saturate acceleration
-        #u_des = np.clip(u_des, -amax, amax)
-        u_des = np.clip(u_des, -50, 50) # what do we actually set the clipping values at #TODO
-        ## 4) desired hand force
-        F_hand = np.array([u_des, 0, 0]) 
-        # todo should this be u_des or u_Des multipleid with mass of p?
-        ## 5) Jacobian J_trans (3 x n). Use MuJoCo helper or finite diff if needed.
-        #J = compute_translational_jacobian(self.m, self.d, hand_body_id)
-        point = np.zeros(3) # attached to body so offset from body
-        jacr = None # omega focused so orientation/angular stuff 
-        jacp = np.zeros((3, self.m.nv)) # linear velocity focus?
-        mujoco.mj_jac(self.m, self.d, jacp, jacr, point, self.hand_body_id) #mj_jac returns void
-        ## 6) task torques (simple map)
-        #tau_task = J.T.dot(F_hand)
-        tau_task = jacp.T.dot(F_hand)
-        ## 7) gravity compensation (MuJoCo can compute it; if not approximate)
-        #tau_g = compute_gravity_torques(self.m, self.d)  # size n
-        # void mj_rne(const mjModel* m, mjData* d, int flg_acc, mjtNum* result)
-        tau_g = np.zeros(self.m.nv)
-        mujoco.mj_rne(self.m, self.d, 0, tau_g)
-        ## 8) posture (nullspace) PD to hold init_qpos, low gain
-        #kp_null = 5.0
-        #kd_null = 0.5
-        #q_err = self.init_qpos - self.d.qpos
-        q_err = self.init_qpos - self.d.qpos
-        kp_null = 5.0
-        kd_null = 0.5
-        #tau_null = kp_null * q_err - kd_null * self.d.
-        tau_null = kp_null * q_err - kd_null * self.d.qvel
-        ## project nullspace: in practice you can add a small tau_null scaled, or compute nullspace projector
-        ## 9) final torque and limits
-        tau = tau_task + tau_g + 0.05 * tau_null # why 0.05? ?? can we do something else?
-        #tau = np.clip(tau, -tau_max, tau_max)
-        tau = np.clip(tau, -200, 200) # why 200? # what do we actually set the clipping values at #TODO
-        #self.d.ctrl[:len(tau)] = tau[:self.m.nu] # dont think this is right, d.ctrl[] is  (nu x 1) 
-        # but that doesnt seem consistent with what we are using, which is nv a lot. which better fits 
-        # use of d.qfrc_applied ? 
-        self.d.qfrc_applied[:self.nv] = tau 
+        # updating self.u_ref as qcrf_bias is different depending on updated pos of robot
+        self.d_temp.qpos[:] = q # this might just not be useful but doesnt seem to hurt idk
+        self.d_temp.qvel[:] = 0.0 # i cant tell
+        self.d_temp.ctrl[:] = 0.0
+        mujoco.mj_forward(self.m, self.d_temp)
+        bias = self.d_temp.qfrc_bias.copy()
+        self.u_ref = bias[:self.nu].copy() 
+        
+        u = self.u_ref - self.K @ (x - self.x_ref)
+        self.d.ctrl[:self.nu] = u
+        
         return True
-
