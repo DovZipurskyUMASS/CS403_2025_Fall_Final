@@ -47,7 +47,6 @@ class YourCtrl:
         
         #Q and R
         Q = np.eye((2*self.nv)) # maybe not touch Q, pend looks tilted in simulation when adjusted?
-        # Q = np.diag([40]*self.nv + [150]*self.nv) # joint pos err penalty, joint vel err penalty
         rho = 0.005 #adjust value
         R = rho * np.eye((self.nu))
         
