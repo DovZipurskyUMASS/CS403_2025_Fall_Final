@@ -1,134 +1,157 @@
 import mujoco
 import numpy as np
-from scipy.linalg import inv, eig
+from scipy.linalg import solve_continuous_are
 
-#mass of pendulum = 0.2
-#inertia of pendulum 0.001 0.003 0.003
-#for PID: need to have a target value we can calculate error from
-#useful mujoco things: d.qpos, d.qvel, d.qacc to get the quaternions of the position,
-#velocity, and acceleration of the joints in global frame
-#things like d.body_pos are localy framed
-
-#chat gpt's pseudocode for pendulum balancing:
-'''
-def CtrlUpdate(self):
-    # 1) compute pendulum vector and angle
-    p_hand = self.d.xpos[hand_body_id]   # 3-vector
-    p_tip  = self.d.xpos[pole_tip_body_id]
-    v = p_tip - p_hand                   # pole vector pointing from hand to tip
-
-    # theta: small-angle about x axis in the x-z plane (x horizontal, z up)
-    theta = math.atan2(v[0], v[2])
-    # differentiate theta (filtered)
-    if not hasattr(self, "theta_prev"):
-        self.theta_prev = theta
-        self.t_prev = 0.0
-        self.theta_dot = 0.0
-    dt = self.m.opt.timestep
-    raw_theta_dot = (theta - self.theta_prev) / dt
-    # simple filter
-    alpha = 0.2
-    self.theta_dot = alpha*raw_theta_dot + (1-alpha)*self.theta_dot
-    self.theta_prev = theta
-
-    # 2) desired pivot acceleration (linear controller or LQR)
-    kp_pend = 120.0   # tune these
-    kd_pend = 20.0
-    xdd_des = -kp_pend * theta - kd_pend * self.theta_dot
-
-    # clamp
-    xdd_des = max(min(xdd_des, 50.0), -50.0)
-
-    # 3) desired force at hand (mass of pole m_p)
-    F_x = pole_mass * xdd_des
-    F = np.array([F_x, 0.0, 0.0])
-
-    # 4) map to joint torques: tau = J^T * F
-    J = compute_translational_jacobian(self.m, self.d, hand_body_id)  # 3 x n
-    tau_task = J.T.dot(F)   # n vector
-
-    # 5) gravity compensation (simple)
-    tau_g = compute_gravity_compensation(self.m, self.d)  # n vector, use MuJoCo function if available
-
-    # 6) final torques + saturation
-    tau = tau_task + tau_g
-    tau = np.clip(tau, -max_tau, max_tau)
-
-    self.d.ctrl[:len(tau)] = tau[:self.m.nu]
-    return True
-
-'''
-
-#pseudocode for LQR
-"""
-def CtrlUpdate(self):
-    # 0) constants (set elsewhere)
-    l = pole_length
-    m_p = pole_mass
-    g = 9.81
-    dt = self.m.opt.timestep
-
-    # 1) read pendulum state
-    p_hand = self.d.xpos[hand_body_id]    # [x,y,z]
-    p_tip  = self.d.xpos[pole_tip_body_id]
-    v = p_tip - p_hand
-    theta = math.atan2(v[0], v[2])   # x horizontal, z up; adjust if axes differ
-
-    # theta_dot: prefer body angvel
-    av = self.d.angvel[pole_body_id]    # body angular velocity (3-vector)
-    theta_dot = av[1]  # choose correct component depending on axis of rotation
-    # alternatively: finite diff with LPF
-
-    # 2) state vector
-    x = np.array([theta, theta_dot])
-
-    # 3) LQR gain K (precomputed offline or compute once in init)
-    u_des = -K.dot(x)   # u_des is desired hand horizontal acceleration
-
-    # saturate acceleration
-    u_des = np.clip(u_des, -amax, amax)
-
-    # 4) desired hand force
-    F_hand = np.array([m_p * u_des, 0.0, 0.0])
-
-    # 5) Jacobian J_trans (3 x n). Use MuJoCo helper or finite diff if needed.
-    J = compute_translational_jacobian(self.m, self.d, hand_body_id)
-
-    # 6) task torques (simple map)
-    tau_task = J.T.dot(F_hand)
-
-    # 7) gravity compensation (MuJoCo can compute it; if not approximate)
-    tau_g = compute_gravity_torques(self.m, self.d)  # size n
-
-    # 8) posture (nullspace) PD to hold init_qpos, low gain
-    kp_null = 5.0
-    kd_null = 0.5
-    q_err = self.init_qpos - self.d.qpos
-    tau_null = kp_null * q_err - kd_null * self.d.qvel
-    # project nullspace: in practice you can add a small tau_null scaled, or compute nullspace projector
-
-    # 9) final torque and limits
-    tau = tau_task + tau_g + 0.05 * tau_null
-    tau = np.clip(tau, -tau_max, tau_max)
-
-    self.d.ctrl[:len(tau)] = tau[:self.m.nu]
-    return True
-"""
+# Heavily referenced from this youtube video: https://www.youtube.com/watch?v=HMyD0IfPHfA
 class YourCtrl:
-  def __init__(self, m:mujoco.MjModel, d: mujoco.MjData):
-    self.m = m
-    self.d = d
-    self.init_qpos = d.qpos.copy()
+    def __init__(self, m:mujoco.MjModel, d: mujoco.MjData):
+        self.m = m
+        self.d = d
+    
+        # Control gains (using similar values to CircularMotion)
+        self.kp = 50.0
+        self.kd = 5.0
+        
+        self.nv = self.m.nv #dof: 7
+        self.nu = self.m.nu #actuators: 6
+        
+        self.d_temp = mujoco.MjData(self.m) #temporary system for A, B calculations
+        
+        #initial position and velocities
+        q0  = self.d.qpos.copy() #q1, q2, q3, q4, q5, q6, q7
+        qd0 = self.d.qvel.copy() #qdot1, qdot2, qdot3, qdot4, qdot5, qdot6, qdot7
+        
+        #set temp model to og positions, no velocities or joint inputs
+        self.d_temp.qpos[:] = q0
+        self.d_temp.qvel[:] = 0.0
+        self.d_temp.ctrl[:] = 0.0
+        
+        mujoco.mj_forward(self.m, self.d_temp)
+        
+        # generalized forces for starting position
+        # emphasize starting position (might be bad for bad starting positions)
+        bias = self.d_temp.qfrc_bias.copy()
+        u0 = bias[:self.nu].copy() 
+        
+        #write starting torques to start position (keep it in place)
+        self.d.ctrl[:self.nu] = u0
+        
+        x0 = np.concatenate([q0, qd0])
+        inputs0 = np.concatenate([x0, u0])
+        f0 = self._f(inputs0)
+        
+        #perturb f1 and compute A and B
+        pert = self._choose_pert(q0)
+        A = self._compute_A(x0, u0, f0, pert)
+        B = self._compute_B(x0, u0, f0, pert)
+        
+        #Q and R
+        Q = np.eye((2*self.nv)) # maybe not touch Q, pend looks tilted in simulation when adjusted?
+        Q[1][1] = 0.2
+        Q[2][2] = 6
+        Q[3][3] = 0.2
+        Q[4][4] = 4
+        #Q[5][5] = 10
+        rho = self._choose_rho(u0)
+        R = rho * np.eye((self.nu))
+        
+        #compute K
+        P = solve_continuous_are(A, B, Q, R)
+        self.K = np.linalg.inv(R) @ B.T @ P
+        
+        self.x_ref = x0
+        self.u_ref = u0
+    
+    def _choose_pert(self, q0):
+        norm = np.linalg.norm(q0)
+        print(norm)
 
-    # Control gains (using similar values to CircularMotion)
-    self.kp = 50.0
-    self.kd = 3.0
+        pert_high = 2e-2
+        pert_low  = 1e-1
+        threshold = 4
+        
+        if norm > threshold:
+            pert = pert_high
+        else:
+            pert = pert_low
+        return pert
+    
+    def _choose_rho(self, u0):
+        tau_norm = np.linalg.norm(u0)
 
+        rho_high = 0.05
+        rho_low  = 0.00001
+        threshold = 20.0
+        
+        if tau_norm > threshold:
+            rho = rho_high
+        else:
+            rho = rho_low
+        print(rho)
+        return rho
+  
+    def _f(self, inputs): # 14 state + 6 control inputs, 14-dim xdot output
+        #state = q1, q1dot, q2, q2dot, q3, q3dot, q4, q4dot, q5, q5dot, q6, q6dot, q7, q7dot
+        #inputs = state, u1, u2, u3, u4, u5, u6
+        #outputs = q1dot, q1ddot, q2dot, q2ddot, q3dot, q3ddot, q4dot, q4ddot, q5dot, q5ddot, q6dot, q6ddot, q7dot, q7ddot
 
-  def CtrlUpdate(self):
-    for i in range(6):
-       self.d.ctrl[i] = 150.0*(self.init_qpos[i] - self.d.qpos[i])  - 5.2 *self.d.qvel[i]
-    return True 
+        q = inputs[0:self.nv]
+        qdot = inputs[self.nv:2*self.nv]
+        u = inputs[2*self.nv:2*self.nv+self.nu]
+        
+        #write info into temp data rather than affecting actual model
+        self.d_temp.qpos[:] = q
+        self.d_temp.qvel[:] = qdot
+        self.d_temp.ctrl[:self.nu] = u
+        
+        mujoco.mj_forward(self.m, self.d_temp)
+ 
+        xdot = np.concatenate([self.d_temp.qvel.copy(), self.d_temp.qacc.copy()])
+        
+        return xdot
+    
+    def _compute_A(self, x0, u0, f0, pert):
+        A = np.zeros((14, 14))
+        for i in range(14):
+            x_pert = x0.copy()
+            x_pert[i] += pert
 
+            inputs_pert = np.concatenate([x_pert, u0])
+            f_pert = self._f(inputs_pert)
+            
+            A[:, i] = (f_pert - f0) / pert
+        return A
+        
+    def _compute_B(self, x0, u0, f0, pert):
+        B = np.zeros((14, 6))
+        for i in range(6):
+            u_pert = u0.copy()
+            u_pert[i] += pert
+            
+            inputs_pert = np.concatenate([x0, u_pert])
+            f_pert = self._f(inputs_pert)
+            
+            B[:, i] = (f_pert - f0) / pert
+        return B
+        
+    
+    def CtrlUpdate(self):
+        q  = self.d.qpos.copy() #q1, q2, q3, q4, q5, q6, q7
+        qd = self.d.qvel.copy() #qdot1, qdot2, qdot3, qdot4, qdot5, qdot6, qdot7
+        #print("max prev value ", max(abs(qd)))
+        #print(np.std(qd[1]))
+        x  = np.concatenate([q, qd])
 
-
+        # updating self.u_ref as qcrf_bias is different depending on updated pos of robot
+        self.d_temp.qpos[:] = q # this might just not be useful but doesnt seem to hurt idk
+        self.d_temp.qvel[:] = 0.0 # i cant tell
+        self.d_temp.ctrl[:] = 0.0
+        mujoco.mj_forward(self.m, self.d_temp)
+        bias = self.d_temp.qfrc_bias.copy()
+        self.u_ref = bias[:self.nu].copy() 
+        
+        u = self.u_ref - self.K @ (x - self.x_ref)
+        #print("max u: ", max(abs(u)))
+        self.d.ctrl[:self.nu] = u
+        
+        return True
