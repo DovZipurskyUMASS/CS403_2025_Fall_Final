@@ -41,13 +41,14 @@ class YourCtrl:
         f0 = self._f(inputs0)
         
         #perturb f1 and compute A and B
-        pert = 2e-1 #adjust value
+        pert = 1e-1 #adjust value
         A = self._compute_A(x0, u0, f0, pert)
         B = self._compute_B(x0, u0, f0, pert)
         
         #Q and R
         Q = np.eye((2*self.nv)) # maybe not touch Q, pend looks tilted in simulation when adjusted?
-        rho = 0.00001 #adjust value
+        Q[2][2] = 4
+        rho = 0.05 #adjust value
         R = rho * np.eye((self.nu))
         
         #compute K
@@ -106,6 +107,8 @@ class YourCtrl:
     def CtrlUpdate(self):
         q  = self.d.qpos.copy() #q1, q2, q3, q4, q5, q6, q7
         qd = self.d.qvel.copy() #qdot1, qdot2, qdot3, qdot4, qdot5, qdot6, qdot7
+        #print("max prev value ", max(abs(qd)))
+        #print(np.std(qd[1]))
         x  = np.concatenate([q, qd])
 
         # updating self.u_ref as qcrf_bias is different depending on updated pos of robot
@@ -117,6 +120,7 @@ class YourCtrl:
         self.u_ref = bias[:self.nu].copy() 
         
         u = self.u_ref - self.K @ (x - self.x_ref)
+        #print("max u: ", max(abs(u)))
         self.d.ctrl[:self.nu] = u
         
         return True
