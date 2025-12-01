@@ -41,13 +41,13 @@ class YourCtrl:
         f0 = self._f(inputs0)
         
         #perturb f1 and compute A and B
-        pert = 1e-2 #adjust value
+        pert = 2e-1 #adjust value
         A = self._compute_A(x0, u0, f0, pert)
         B = self._compute_B(x0, u0, f0, pert)
         
         #Q and R
         Q = np.eye((2*self.nv)) # maybe not touch Q, pend looks tilted in simulation when adjusted?
-        rho = 0.005 #adjust value
+        rho = 0.00001 #adjust value
         R = rho * np.eye((self.nu))
         
         #compute K
