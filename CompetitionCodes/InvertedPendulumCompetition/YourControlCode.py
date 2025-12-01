@@ -3,6 +3,18 @@ import numpy as np
 from scipy.linalg import solve_continuous_are
 
 # Heavily referenced from this youtube video: https://www.youtube.com/watch?v=HMyD0IfPHfA
+
+#position 3:
+#best rho: 0.05
+#best pert: 0.1
+
+#position 2:
+#best rho: 0.01
+#best pert: 0.0001
+
+#position 4:
+#best rho: 0.01
+#best pert: 0.001
 class YourCtrl:
     def __init__(self, m:mujoco.MjModel, d: mujoco.MjData):
         self.m = m
@@ -41,14 +53,14 @@ class YourCtrl:
         f0 = self._f(inputs0)
         
         #perturb f1 and compute A and B
-        pert = 1e-1 #adjust value
+        pert = self._choose_pert(q0)
         A = self._compute_A(x0, u0, f0, pert)
         B = self._compute_B(x0, u0, f0, pert)
         
         #Q and R
         Q = np.eye((2*self.nv)) # maybe not touch Q, pend looks tilted in simulation when adjusted?
-        Q[2][2] = 4
-        rho = 0.05 #adjust value
+        Q[2][2] = 2
+        rho = self._choose_rho(u0)
         R = rho * np.eye((self.nu))
         
         #compute K
@@ -57,8 +69,34 @@ class YourCtrl:
         
         self.x_ref = x0
         self.u_ref = u0
+    
+    def _choose_pert(self, q0):
+        norm = np.linalg.norm(q0)
+        print(norm)
+
+        pert_high = 0.1
+        pert_low  = 0.001
+        threshold = 4
         
+        if norm > threshold:
+            pert = pert_high
+        else:
+            pert = pert_low
+        return pert
+    
+    def _choose_rho(self, u0):
+        tau_norm = np.linalg.norm(u0)
+
+        rho_high = 0.05
+        rho_low  = 0.01
+        threshold = 20.0
         
+        if tau_norm > threshold:
+            rho = rho_high
+        else:
+            rho = rho_low
+        return rho
+  
     def _f(self, inputs): # 14 state + 6 control inputs, 14-dim xdot output
         #state = q1, q1dot, q2, q2dot, q3, q3dot, q4, q4dot, q5, q5dot, q6, q6dot, q7, q7dot
         #inputs = state, u1, u2, u3, u4, u5, u6
