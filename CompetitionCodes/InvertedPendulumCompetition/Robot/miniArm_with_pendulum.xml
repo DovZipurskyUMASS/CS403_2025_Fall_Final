@@ -97,11 +97,11 @@
                                 -2.1 2.2 0 0"
                                 qvel="0.0 0 0 
                                 0 0 0 0" /> -->
-     <key name="init_pose" qpos="0 0.0 0 
+    <key name="init_pose" qpos="0 0.0 0 
                                 0.0 0.0 0 0"
                                 qvel="0.0 0 0 
                                 0 0 0 0.0" /> 
-    <!--  <key name="init_pose" qpos="0 -0.144 0 
+    <!-- <key name="init_pose" qpos="0 -0.144 0 
                                 -1.6 1.74 0"
                                 qvel="0 0 0 
                                 0 0 0" /> -->

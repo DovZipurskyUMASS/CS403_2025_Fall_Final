@@ -59,7 +59,11 @@ class YourCtrl:
         
         #Q and R
         Q = np.eye((2*self.nv)) # maybe not touch Q, pend looks tilted in simulation when adjusted?
-        Q[2][2] = 2
+        Q[1][1] = 0.2
+        Q[2][2] = 6
+        Q[3][3] = 0.2
+        Q[4][4] = 4
+        #Q[5][5] = 10
         rho = self._choose_rho(u0)
         R = rho * np.eye((self.nu))
         
@@ -74,8 +78,8 @@ class YourCtrl:
         norm = np.linalg.norm(q0)
         print(norm)
 
-        pert_high = 0.1
-        pert_low  = 0.001
+        pert_high = 2e-2
+        pert_low  = 1e-1
         threshold = 4
         
         if norm > threshold:
@@ -88,13 +92,14 @@ class YourCtrl:
         tau_norm = np.linalg.norm(u0)
 
         rho_high = 0.05
-        rho_low  = 0.01
+        rho_low  = 0.00001
         threshold = 20.0
         
         if tau_norm > threshold:
             rho = rho_high
         else:
             rho = rho_low
+        print(rho)
         return rho
   
     def _f(self, inputs): # 14 state + 6 control inputs, 14-dim xdot output
